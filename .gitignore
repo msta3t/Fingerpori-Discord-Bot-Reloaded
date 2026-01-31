@@ -5,9 +5,13 @@ venv/
 .venv/
 env/
 .env/
+.env
 ENV/
 bin/
 lib/
 include/
 
 .vscode/
+
+fpori.db
+images/
