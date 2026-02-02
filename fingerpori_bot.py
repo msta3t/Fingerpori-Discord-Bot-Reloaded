@@ -208,7 +208,6 @@ class AdminCog(commands.Cog):
                 "Manual scrape started", ephemeral=True
             )
             await posts_cog.send_to_discord()
-            await interaction.response.send_message("pori scraped", ephemeral=True)
         else:
             await interaction.response.send_message(
                 "error: PostsCog not loaded.", ephemeral=True
