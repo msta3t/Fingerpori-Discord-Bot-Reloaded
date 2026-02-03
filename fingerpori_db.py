@@ -2,11 +2,14 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 import imagehash
 import io
+import logging
 import os
 from PIL import Image
 import requests
 import sqlite3
 from typing import Optional
+
+logger = logging.getLogger("fingerpori_db")
 
 @dataclass
 class Comic:
@@ -16,6 +19,7 @@ class Comic:
     path: str
     content: bytes = b""
     message_id: Optional[int] = None
+    poll_closed: bool = True
 
 
 load_dotenv()
@@ -40,6 +44,7 @@ class DbManager:
                 url TEXT,
                 path TEXT,
                 message_id INTEGER,
+                poll_closed INTEGER DEFAULT 0,
                 rating_0 INTEGER DEFAULT 0,
                 rating_1 INTEGER DEFAULT 0,
                 rating_2 INTEGER DEFAULT 0,
@@ -85,7 +90,7 @@ class DbManager:
                 image_hash = str(imagehash.phash(img))
 
         else:
-            raise Exception(f"image download failed with status: {img.status_code}")
+            raise Exception(f"image download for comic {date} failed with status: {img.status_code}")
 
         try:
             cursor = self.conn.cursor()
@@ -100,22 +105,22 @@ class DbManager:
                     os.makedirs(IMAGE_PATH)
                 with open(path, "wb") as f:
                     f.write(img_content)
-                print(f"comic {date} saved to db")
+                logger.debug(f"comic stored in db: \ndate:\t{date}\nhash:\t")
             else:
-                print(f"comic {date} is already in db")
+                logger.info(f"comic is already in db: \ndate:\t{date}\nhash:\t")
                 return None
         except sqlite3.Error as e:
-            print(f"db error: {e}")
+            logger.error(f"db error: {e}")
             return None
         except Exception as e:
-            print(f"saving comic failed: {e}")
+            logger.error(f"saving comic failed: {e}")
             return None
         return Comic(date, image_hash, url, path, img_content)
 
     def update_message_id(self, comic: Comic):
         try:
             if not comic.message_id:
-                raise Exception("comic missing message_id")
+                raise Exception(f"comic {comic.date} missing message_id")
             cursor = self.conn.cursor()
             cursor.execute(
                 "UPDATE fingerpori SET MESSAGE_ID = ? WHERE hash = ?",
@@ -125,18 +130,18 @@ class DbManager:
 
             if cursor.rowcount == 0:
                 raise Exception(
-                    f"update message_id failed: no rows found for {comic.message_id}"
+                    f"no rows found for {comic.message_id}"
                 )
             else:
-                print(f"message id updated: {comic.date}, {comic.message_id}")
+                logger.debug(f"message id updated: \ndate:\t{comic.date}\nmessage_id:\t{comic.message_id}")
         except Exception as e:
-            print(f"error updating message_id: {e}")
+            logger.error(f"error updating message_id: {e}")
 
-    def update_reactions(self, comic: Comic, ratings: list):
+    def update_ratings(self, comic: Comic, ratings: list):
         try:
             cursor = self.conn.cursor()
             cursor.execute(
-                "UPDATE fingerpori SET rating_0 = ?, rating_1 = ?, rating_2 = ?, rating_3 = ?, rating_4 = ?, rating_5 = ? WHERE hash = ?",
+                "UPDATE fingerpori SET poll_closed = 1, rating_0 = ?, rating_1 = ?, rating_2 = ?, rating_3 = ?, rating_4 = ?, rating_5 = ? WHERE date = ?",
                 (
                     ratings[0],
                     ratings[1],
@@ -144,17 +149,17 @@ class DbManager:
                     ratings[3],
                     ratings[4],
                     ratings[5],
-                    comic.img_hash,
+                    comic.date,
                 ),
             )
             self.conn.commit()
         except Exception as e:
-            print(f"error syncing reactions: {e}")
+            logger.error(f"error updating ratings: {e}")
 
     def get_past_n_comics(self, count: int):
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT date, hash, url, path, message_id FROM fingerpori ORDER BY date DESC LIMIT ?",
+            "SELECT date, hash, url, path, message_id, poll_closed FROM fingerpori ORDER BY date DESC LIMIT ?",
             (count,),
         )
         rows = cursor.fetchall()
@@ -166,6 +171,7 @@ class DbManager:
                     url=row[2],
                     path=row[3],
                     message_id=row[4],
+                    poll_closed=row[5]
                 )
                 for row in rows
             ]

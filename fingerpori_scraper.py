@@ -1,6 +1,7 @@
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
+import logging
 import os
 from playwright.sync_api import sync_playwright
 import re
@@ -14,6 +15,7 @@ load_dotenv()
 TARGET_URL = "https://www.hs.fi/sarjakuvat/fingerpori/"
 IMAGE_PATH = "images/"
 
+logger = logging.getLogger("fingerpori_scraper")
 
 def get_year(comic_month: int):
     now = datetime.now()
@@ -80,12 +82,12 @@ def send_to_webhook(comic):
         if conn:
             db.save_comic(date, url)
         else:
-            print("could not save comic to db")
+            logger.critical("could not save comic to db")
     else:
         payload = {"content": "botti rikki :/"}
     r = requests.post(WEBHOOK_URL, json=payload)  
     if r.status_code != 204:
-        print(f"Error: {r.text}")
+        logger.error(f"Error: {r.text}")
 
 
 if __name__ == "__main__":

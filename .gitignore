@@ -15,3 +15,4 @@ include/
 
 fpori.db
 images/
+*.log

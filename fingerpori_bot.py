@@ -2,9 +2,11 @@ import asyncio
 from datetime import datetime, timedelta
 import discord
 from discord import app_commands
+from discord.utils import _ColourFormatter
 from discord.ext import tasks, commands
 from dotenv import load_dotenv
 import io
+import logging
 import os
 from PIL import Image, ImageOps
 import sys
@@ -12,21 +14,52 @@ from typing import Optional, TYPE_CHECKING, cast
 import zoneinfo
 
 import fingerpori_scraper as scraper
-from fingerpori_db import DbManager
+from fingerpori_db import Comic, DbManager
 
 if TYPE_CHECKING:
     from fingerpori_bot import FingerporiBot
 
 load_dotenv()
 
+
+# logging setup
+discord.utils.setup_logging(level=logging.INFO)
+
+root_logger = logging.getLogger()
+console_handler = root_logger.handlers[0]
+
+console_formatter = _ColourFormatter(
+    "[{asctime}] [{levelname:<8}] {name}: {message}",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    style="{",
+)
+console_handler.setFormatter(console_formatter)
+
+file_handler = logging.FileHandler("bot.log", encoding="utf-8", mode="w")
+file_formatter = logging.Formatter(
+    "[{asctime}] [{levelname:<8}] {name}: {message}",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    style="{",
+)
+file_handler.setFormatter(file_formatter)
+root_logger.addHandler(file_handler)
+
+logger = logging.getLogger("fingerpori_bot")
+
+
+# post times
 TIMEZONE = zoneinfo.ZoneInfo("Europe/Helsinki")
 phour, pminute = map(int, os.getenv("POST_TIME", "03:00").split(":"))
-post_dt = datetime.now(TIMEZONE).replace(hour=phour, minute=pminute, second=0, microsecond=0)
-reaction_dt = post_dt - timedelta(minutes=15)
+post_dt = datetime.now(TIMEZONE).replace(
+    hour=phour, minute=pminute, second=0, microsecond=0
+)
+sub_dt = post_dt - timedelta(minutes=5)
 
 POST_TIME = post_dt.timetz()
-SUB_TIME = reaction_dt.timetz()
+SUB_TIME = sub_dt.timetz()
 
+
+# env
 GUILD_ID = os.getenv("GUILD_ID")
 TOKEN = os.getenv("TOKEN")
 if TOKEN is None:
@@ -41,6 +74,7 @@ class FingerporiBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guild_reactions = True
+        intents.polls = True
         super().__init__(command_prefix="/", intents=intents)
 
         self.db = db
@@ -65,10 +99,15 @@ class FingerporiBot(commands.Bot):
         if self.channel_id:
             await self.add_cog(PostsCog(self))
             await self.add_cog(InteractCog(self))
-            await self.add_cog(ReactionCog(self))
+            await self.add_cog(RatingsCog(self))
         else:
-            print(
-                "!!! channel id not registered, run /set_channel and restart the bot !!!"
+            logger.critical(
+                """
+                \033[91m
+                ***********************************************************************
+                !!! channel id not registered, run /set_channel and restart the bot !!!
+                ***********************************************************************
+                \033[0m"""
             )
 
         # sync commands
@@ -76,7 +115,7 @@ class FingerporiBot(commands.Bot):
         await self.tree.sync(guild=GUILD)
 
     async def on_ready(self):
-        print(f"logged in as {self.user}")
+        logger.info(f"logged in as {self.user}")
 
 
 class PostsCog(commands.Cog):
@@ -88,32 +127,45 @@ class PostsCog(commands.Cog):
     async def send_to_discord(self):
         data = await asyncio.to_thread(scraper.get_latest_fingerpori)
         if not self.bot.active_channel:
-            print("no active channel")
+            logger.critical("no active channel!!!")
             return
         if not data:
-            print("botti rikki :/")
+            logger.error("botti rikki :/")
             await self.bot.active_channel.send("botti rikki :/")
             return
 
         comic = self.bot.db.save_comic(data["date"], data["url"])
 
         if not comic:
-            print("skipping comic")
+            logger.info("skipping comic")
             return
 
-        self.bot.latest_image = Image.open(comic.path)
-        file = discord.File(comic.path, filename="comic.jpg")
-        embed = discord.Embed(
-            title=f"Päivän Fingerpori",
-            color=discord.Color.lighter_grey(),
+        poll = discord.Poll(
+            duration=timedelta(hours=1, minutes=0),
+            question=f"Päivän Fingerpori",
+            multiple=False,
         )
-        embed.set_image(url=f"attachment://comic.jpg")
+        poll.add_answer(text="\u2800", emoji="5️⃣")
+        poll.add_answer(text="\u2800", emoji="4️⃣")
+        poll.add_answer(text="\u2800", emoji="3️⃣")
+        poll.add_answer(text="\u2800", emoji="2️⃣")
+        poll.add_answer(text="\u2800", emoji="1️⃣")
+        poll.add_answer(text="\u2800", emoji="0️⃣")
+
+        embed = discord.Embed(color=discord.Color.light_grey())
+        embed.set_image(url=data["url"])
         embed.set_footer(
-            text=f"Fingerpori {datetime.strptime(comic.date, "%Y-%m-%d").strftime("%d.%m.%Y")}"
+            text=f'{datetime.strptime(comic.date, "%Y-%m-%d").strftime("%d.%m.%Y")}'
         )
-        message = await self.bot.active_channel.send(embed=embed, file=file)
+
+        message = await self.bot.active_channel.send(embed=embed, poll=poll)
         comic.message_id = message.id
         self.bot.db.update_message_id(comic)
+
+    @send_to_discord.before_loop
+    async def before_send_to_discord(self):
+        await self.bot.wait_until_ready()
+        logger.debug("starting PostsCog @task.loop")
 
 
 class InteractCog(commands.Cog):
@@ -124,6 +176,7 @@ class InteractCog(commands.Cog):
     @app_commands.command(name="invert")
     async def invert(self, interaction: discord.Interaction):
         if not self.bot.active_channel:
+            logger.critical("no active channel!!!")
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -132,7 +185,7 @@ class InteractCog(commands.Cog):
             if not self.bot.latest_image:
                 comic = self.bot.db.get_past_n_comics(1)
                 if not comic:
-                    return print("could not get latest comic from db")
+                    return logger.error("could not get latest comic from db")
                 comic = comic[0]
                 self.bot.latest_image = Image.open(comic.path)
             self.inverted = ImageOps.invert(self.bot.latest_image)
@@ -148,51 +201,60 @@ class InteractCog(commands.Cog):
         await interaction.delete_original_response()
 
 
-class ReactionCog(commands.Cog):
+class RatingsCog(commands.Cog):
     def __init__(self, bot: "FingerporiBot"):
         self.bot = bot
-        self.update_reactions.start()
+        self.EMOJI_MAP = {"0️⃣": 0, "1️⃣": 1, "2️⃣": 2, "3️⃣": 3, "4️⃣": 4, "5️⃣": 5}
+        self.update_ratings.start()
 
     @tasks.loop(time=SUB_TIME)
-    async def update_reactions(self):
+    async def update_ratings(self):
         if not self.bot.active_channel:
+            logger.critical("no active channel!!!")
             return
-        print("syncing reactions to db")
+
+        logger.debug("syncing reactions to db")
 
         comics = self.bot.db.get_past_n_comics(7)
 
         for comic in comics:
             if not comic.message_id:
-                print(f"comic {comic.date} message_id missing")
-                return
+                logger.warning(f"comic {comic.date} message_id missing")
+                continue
+            if comic.poll_closed:
+                logger.debug(f"comic {comic.date} poll already closed")
+                continue
             try:
                 message = await self.bot.active_channel.fetch_message(comic.message_id)
-                ratings = [0, 0, 0, 0, 0, 0]
-                for reaction in message.reactions:
-                    count = reaction.count
-                    match str(reaction.emoji):
-                        case "0️⃣":
-                            ratings[0] = count
-                        case "1️⃣":
-                            ratings[1] = count
-                        case "2️⃣":
-                            ratings[2] = count
-                        case "3️⃣":
-                            ratings[3] = count
-                        case "4️⃣":
-                            ratings[4] = count
-                        case "5️⃣":
-                            ratings[5] = count
-                        case _:
-                            pass
-                self.bot.db.update_reactions(comic, ratings)
+                if (
+                    message.poll
+                    and message.poll.answers
+                    and message.poll.is_finalised()
+                ):
+                    ratings = [0, 0, 0, 0, 0, 0]
+                    for answer in message.poll.answers:
+                        emoji = str(answer.emoji)
+                        if emoji in self.EMOJI_MAP:
+                            index = self.EMOJI_MAP[emoji]
+                            ratings[index] = answer.vote_count
+                        else:
+                            logger.warning(f"unexpected poll answer: {answer.text}")
+                    self.bot.db.update_ratings(comic, ratings)
+                else:
+                    logger.warning(f"comic {comic.date} poll not found or finalized")
+                    continue
             except discord.NotFound:
-                print(f"message {comic.message_id} not found")
-                return
+                logger.warning(f"message {comic.message_id} not found")
+                continue
             except Exception as e:
-                print(f"error syncing {comic.message_id}: {e}")
-                return
-        print("reactions synced")
+                logger.error(f"error syncing {comic.message_id}: {e}")
+                continue
+        logger.info("reactions synced")
+
+    @update_ratings.before_loop
+    async def before_loop(self):
+        await self.bot.wait_until_ready()
+        logger.debug("starting RatingsCog @task.loop")
 
 
 class AdminCog(commands.Cog):
@@ -219,10 +281,14 @@ class AdminCog(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def set_channel(self, interaction: discord.Interaction):
 
-        channel_id = str(interaction.channel_id)
-        self.bot.db.set_config("channel_id", channel_id)
+        channel_id = interaction.channel_id
+        self.bot.db.set_config("channel_id", str(channel_id))
+
         await interaction.response.send_message(
             f"Update channel set to <#{channel_id}>"
+        )
+        logger.info(
+            f"Update channel set to #{channel_id}. Restart bot for changes to take effect"
         )
 
 
