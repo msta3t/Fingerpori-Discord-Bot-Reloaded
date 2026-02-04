@@ -5,6 +5,8 @@ Logic to find comic and get around HS bot detection is vibe coded with Gemini.
 
 Expect this to break often as HS constanly changes their site :)
 
+Don't forget to run `playwright install` and `playwright install-deps` for the scraper to work
+
 ## fingerpori_bot usage
 Paste your guild id in .env.default and rename to .env
 
@@ -26,6 +28,7 @@ In **Settings** -> **OAuth2**
   - **applications.commands**
 -  Check in **Bot Permissions** -> **Text Permissions**:
    -  **Send Messages**
+   -  **Embed Links**
    -  **Read Message History**
    -  **Create Polls**
 - Open generated URL to add the bot to your server
