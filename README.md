@@ -27,6 +27,7 @@ In **Settings** -> **OAuth2**
 -  Check in **Bot Permissions** -> **Text Permissions**:
    -  **Send Messages**
    -  **Read Message History**
+   -  **Create Polls**
 - Open generated URL to add the bot to your server
 
 Run the bot and use /set_channel in the channel you wish to receive comics in. 

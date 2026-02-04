@@ -249,7 +249,7 @@ class RatingsCog(commands.Cog):
             except Exception as e:
                 logger.error(f"error syncing {comic.message_id}: {e}")
                 continue
-        logger.info("reactions synced")
+        logger.info("ratings synced")
 
     @update_ratings.before_loop
     async def before_loop(self):
