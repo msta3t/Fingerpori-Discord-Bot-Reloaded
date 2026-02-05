@@ -117,6 +117,9 @@ class FingerporiBot(commands.Bot):
     async def on_ready(self):
         logger.info(f"logged in as {self.user}")
 
+    async def on_guild_join(self, guild):
+        return
+
 
 class PostsCog(commands.Cog):
     def __init__(self, bot: "FingerporiBot"):

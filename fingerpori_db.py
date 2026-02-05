@@ -38,43 +38,47 @@ class DbManager:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS fingerpori (
-                date TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS comic (
+                comic_id INTEGER PRIMARY KEY,
+                date TEXT UNIQUE,
                 hash TEXT UNIQUE,
                 url TEXT,
                 path TEXT,
-                message_id INTEGER,
-                poll_closed INTEGER DEFAULT 0,
-                rating_0 INTEGER DEFAULT 0,
-                rating_1 INTEGER DEFAULT 0,
-                rating_2 INTEGER DEFAULT 0,
-                rating_3 INTEGER DEFAULT 0,
-                rating_4 INTEGER DEFAULT 0,
-                rating_5 INTEGER DEFAULT 0
+                poll_closed INTEGER DEFAULT 0
                 )
         """
         )
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS guild (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                rating_mode INTEGER DEFAULT 1 CHECK (rating_mode BETWEEN 0 AND 3) -- 0 = none, 1 = poll, 2 = reaction, 3 = button
                 )
         """
         )
-        self.conn.commit()
-
-    def get_config(self, key: str, default=None):
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        row = cursor.fetchone()
-        return row[0] if row else default
-
-    def set_config(self, key: str, value: str):
-        cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, str(value)),
+            """
+            CREATE TABLE IF NOT EXISTS message (
+                guild_id INTEGER,
+                comic_id INTEGER,
+                message_id INTEGER UNIQUE,
+                PRIMARY KEY (guild_id, comic_id),
+                FOREIGN KEY (guild_id) REFERENCES guild(guild_id),
+                FOREIGN KEY (comic_id) REFERENCES comic(comic_id)
+                )
+        """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vote (
+                message_id INTEGER,
+                user_id INTEGER,
+                rating INTEGER,
+                PRIMARY KEY (message_id, user_id),
+                FOREIGN KEY (message_id) REFERENCES message(message_id)
+            )
+        """
         )
         self.conn.commit()
 
