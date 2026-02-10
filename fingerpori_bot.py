@@ -1,7 +1,7 @@
-import asyncio
 from datetime import datetime, timedelta
+from discord.user import User
 import discord
-from discord import app_commands
+from discord import TextChannel, app_commands
 from discord.utils import _ColourFormatter
 from discord.ext import tasks, commands
 from dotenv import load_dotenv
@@ -10,14 +10,11 @@ import logging
 import os
 from PIL import Image, ImageOps
 import sys
-from typing import Optional, TYPE_CHECKING, cast
+from typing import override
 import zoneinfo
 
 import fingerpori_scraper as scraper
-from fingerpori_db import Comic, DbManager
-
-if TYPE_CHECKING:
-    from fingerpori_bot import FingerporiBot
+from fingerpori_db import DbManager, RatingMode
 
 load_dotenv()
 
@@ -60,133 +57,292 @@ SUB_TIME = sub_dt.timetz()
 
 
 # env
-GUILD_ID = os.getenv("GUILD_ID")
+USER_ID = int(os.getenv("USER_ID"))  # pyright: ignore[reportArgumentType]
 TOKEN = os.getenv("TOKEN")
 if TOKEN is None:
     sys.exit("no token provided")
-if GUILD_ID is None:
-    sys.exit("no guild id provided")
-GUILD = discord.Object(id=GUILD_ID)
+
+
+def is_owner():
+    def predicate(interaction: discord.Interaction) -> bool:
+        return interaction.user.id == USER_ID
+
+    return app_commands.check(predicate)
+
+
+class PostView(discord.ui.View):
+    def __init__(self, comic_id: int):
+        super().__init__(timeout=None)
+        self.comic_id: int = comic_id
+
+        self.add_item(
+            discord.ui.Button(
+                style=discord.ButtonStyle.grey,
+                label="0 (0)",
+                custom_id=f"fpori:{self.comic_id}:1",
+                row=0,
+                emoji="1️⃣",
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                style=discord.ButtonStyle.grey,
+                label="0 (0)",
+                custom_id=f"fpori:{self.comic_id}:2",
+                row=0,
+                emoji="2️⃣",
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                style=discord.ButtonStyle.grey,
+                label="0 (0)",
+                custom_id=f"fpori:{self.comic_id}:3",
+                row=0,
+                emoji="3️⃣",
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                style=discord.ButtonStyle.grey,
+                label="0 (0)",
+                custom_id=f"fpori:{self.comic_id}:4",
+                row=0,
+                emoji="4️⃣",
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                style=discord.ButtonStyle.grey,
+                label="0 (0)",
+                custom_id=f"fpori:{self.comic_id}:5",
+                row=0,
+                emoji="5️⃣",
+            )
+        )
 
 
 class FingerporiBot(commands.Bot):
-    def __init__(self, db: DbManager, *args, **kwargs):
+    def __init__(self, db: DbManager, *args, **kwargs):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.guilds = True
         intents.guild_reactions = True
         intents.polls = True
+        intents.members = True
         super().__init__(command_prefix="/", intents=intents)
 
-        self.db = db
-        self.channel_id = None
-        self.latest_image: Optional[Image.Image] = None
+        self.db: DbManager = db
 
-    @property
-    def active_channel(self) -> Optional[discord.abc.Messageable]:
-        if not self.channel_id:
-            return None
+        self.active_comics: set[int] = set[int]()
+        self.latest_image: Image.Image | None = None
 
-        channel = self.get_channel(self.channel_id)
-        return channel if isinstance(channel, discord.abc.Messageable) else None
-
+    @override
     async def setup_hook(self):
-        raw_channel_id = self.db.get_config("channel_id")
-        if raw_channel_id:
-            self.channel_id = int(raw_channel_id)
-
+        await self.db.connect()
         await self.add_cog(AdminCog(self))
-
-        if self.channel_id:
-            await self.add_cog(PostsCog(self))
-            await self.add_cog(InteractCog(self))
-            await self.add_cog(RatingsCog(self))
-        else:
-            logger.critical(
-                """
-                \033[91m
-                ***********************************************************************
-                !!! channel id not registered, run /set_channel and restart the bot !!!
-                ***********************************************************************
-                \033[0m"""
-            )
-
-        # sync commands
-        self.tree.copy_global_to(guild=GUILD)
-        await self.tree.sync(guild=GUILD)
+        await self.add_cog(GuildCog(self))
+        await self.add_cog(PostsCog(self))
+        await self.add_cog(InteractCog(self))
+        await self.add_cog(VoteCog(self))
+        self.active_comics.clear()
+        self.active_comics.update(await self.db.get_active_comic_ids())
 
     async def on_ready(self):
         logger.info(f"logged in as {self.user}")
 
-    async def on_guild_join(self, guild):
-        return
+
+class GuildCog(commands.Cog):
+    def __init__(self, bot: FingerporiBot):
+        self.bot: FingerporiBot = bot
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        logger.info(f"joining into new guild {guild.id}")
+        channel = guild.system_channel or None
+        if not channel or not channel.permissions_for(guild.me).send_messages:
+            channel = next(
+                (
+                    chan
+                    for chan in guild.text_channels
+                    if chan.permissions_for(guild.me).send_messages
+                ),
+                None,
+            )
+        channel_id = channel.id if channel else None
+        if not await self.bot.db.new_guild(guild.id, channel_id):
+            logger.critical(f"inserting guild to db failed! {guild.id}")
+        logger.info(f"joined to guild: {guild.name} ({guild.id})")
+        if channel:
+            await channel.send(
+                f"Tervetuloa {guild.name}. Vaihda kannua ajamalla /set_channel"
+            )
+            return
+
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild: discord.Guild):
+        logger.info(f"left guild: {guild.name} ({guild.id})")
 
 
 class PostsCog(commands.Cog):
-    def __init__(self, bot: "FingerporiBot"):
-        self.bot = bot
+    def __init__(self, bot: FingerporiBot):
+        self.bot: FingerporiBot = bot
         self.send_to_discord.start()
 
     @tasks.loop(time=POST_TIME)
     async def send_to_discord(self):
-        data = await asyncio.to_thread(scraper.get_latest_fingerpori)
-        if not self.bot.active_channel:
-            logger.critical("no active channel!!!")
-            return
+        data = await scraper.get_latest_fingerpori()
         if not data:
             logger.error("botti rikki :/")
-            await self.bot.active_channel.send("botti rikki :/")
+            user: User | None = self.bot.get_user(USER_ID)
+            if isinstance(user, User):
+                await user.send("botti rikki :/")
             return
 
-        comic = self.bot.db.save_comic(data["date"], data["url"])
+        img_date, img_url, img_bytes = data["date"], data["url"], data["bytes"]
+
+        comic = await self.bot.db.save_comic(
+            img_date, img_url, img_bytes # pyright: ignore[reportArgumentType]
+        )  
 
         if not comic:
             logger.info("skipping comic")
             return
-
-        poll = discord.Poll(
-            duration=timedelta(hours=1, minutes=0),
-            question=f"Päivän Fingerpori",
-            multiple=False,
-        )
-        poll.add_answer(text="\u2800", emoji="5️⃣")
-        poll.add_answer(text="\u2800", emoji="4️⃣")
-        poll.add_answer(text="\u2800", emoji="3️⃣")
-        poll.add_answer(text="\u2800", emoji="2️⃣")
-        poll.add_answer(text="\u2800", emoji="1️⃣")
-        poll.add_answer(text="\u2800", emoji="0️⃣")
 
         embed = discord.Embed(color=discord.Color.light_grey())
         embed.set_image(url=data["url"])
         embed.set_footer(
             text=f'{datetime.strptime(comic.date, "%Y-%m-%d").strftime("%d.%m.%Y")}'
         )
+        guilds = await self.bot.db.get_guilds()
+        if not guilds:
+            logger.warning("no guilds found")
+            return
+        for guild in guilds:
+            if not self.bot.get_guild(guild.guild_id):
+                logger.info(f"skipping {guild.guild_id}: bot is no longer a member")
+            channel = self.bot.get_channel(guild.channel_id)
+            if not channel:
+                try:
+                    channel = await self.bot.fetch_channel(guild.channel_id)
+                except (discord.NotFound, discord.Forbidden):
+                    logger.warning(
+                        f"guild {guild.guild_id} channel {guild.channel_id} missing"
+                    )
+                    continue
+            rating_mode = RatingMode(guild.rating_mode)
 
-        message = await self.bot.active_channel.send(embed=embed, poll=poll)
-        comic.message_id = message.id
-        self.bot.db.update_message_id(comic)
+            if not isinstance(channel, TextChannel):
+                logger.warning(f"{guild.guild_id} channel not found or not messageable")
+                continue
+            try:
+                if rating_mode == RatingMode.VIEW:
+                    message = await channel.send(embed=embed, view=PostView(comic.id))
+                else:
+                    message = await channel.send(embed=embed)
+
+                if not await self.bot.db.new_message(
+                    guild.guild_id, comic.id, message.id, channel.id
+                ):
+                    logger.error("message insert failed")
+                    await message.delete()
+            except discord.Forbidden:
+                logger.error(f"missing permissions to send in {channel.id}")
+            except discord.HTTPException as e:
+                logger.error(f"failed to send message: {e}")
+        self.bot.active_comics.add(comic.id)
 
     @send_to_discord.before_loop
     async def before_send_to_discord(self):
         await self.bot.wait_until_ready()
-        logger.debug("starting PostsCog @task.loop")
+
+
+class VoteCog(commands.Cog):
+    def __init__(self, bot: "FingerporiBot"):
+        self.bot: FingerporiBot = bot
+        self.close_polls.start()
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if not interaction.data or not interaction.message or not interaction.guild_id:
+            return
+        custom_id = interaction.data.get("custom_id")
+        if not custom_id or not custom_id.startswith("fpori:"):
+            return
+        try:
+            parts = custom_id.split(":")
+            comic_id = int(parts[1])
+            rating = int(parts[2])
+        except (IndexError, ValueError):
+            return
+        if int(comic_id) not in self.bot.active_comics:
+            return
+        await self.bot.db.save_vote(
+            comic_id, interaction.user.id, rating, interaction.message.id
+        )
+
+        votes = await self.bot.db.get_votes(interaction.guild_id, comic_id)
+
+        view = discord.ui.View.from_message(interaction.message)
+        for item in view.children:
+            if isinstance(item, discord.ui.Button) and item.custom_id:
+                rating = int(item.custom_id.split(":")[2])
+                localvotes, globalvotes = votes.get(rating, (0, 0))
+                item.label = f"{localvotes} ({globalvotes})"
+        await interaction.response.edit_message(view=view)
+
+    @tasks.loop(time=SUB_TIME)
+    async def close_polls(self):
+        messages = await self.bot.db.get_active_messages()
+        closed: set[int] = set()
+
+        for row in messages:
+            message_id, channel_id, guild_id, comic_id = row
+
+            votes = await self.bot.db.get_votes(guild_id, comic_id)
+            try:
+                channel = self.bot.get_channel(
+                    channel_id
+                ) or await self.bot.fetch_channel(channel_id)
+                if not isinstance(channel, discord.TextChannel):
+                    continue
+                message = await channel.fetch_message(message_id)
+                if not isinstance(message, discord.Message):
+                    continue
+
+                view = discord.ui.View.from_message(message)
+                for item in view.children:
+                    if isinstance(item, discord.ui.Button) and item.custom_id:
+                        item.disabled = True
+                        item.style = discord.ButtonStyle.grey
+
+                        rating = int(item.custom_id.split(":")[2])
+                        localvotes, globalvotes = votes.get(rating, (0, 0))
+                        item.label = f"{localvotes} ({globalvotes})"
+                await message.edit(view=view)
+            except discord.NotFound:
+                logger.warning(f"message {message_id} not found")
+            except Exception as e:
+                logger.warning(f"failed to close poll for {message_id}: {e}")
+            closed.add(comic_id)
+        await self.bot.db.close_polls(closed)
+
+    @close_polls.before_loop
+    async def before_loop(self):
+        await self.bot.wait_until_ready()
 
 
 class InteractCog(commands.Cog):
     def __init__(self, bot: "FingerporiBot"):
-        self.bot = bot
-        self.inverted = None
+        self.bot: FingerporiBot = bot
+        self.inverted: Image.Image | None = None
 
     @app_commands.command(name="invert")
     async def invert(self, interaction: discord.Interaction):
-        if not self.bot.active_channel:
-            logger.critical("no active channel!!!")
-            return
-
         await interaction.response.defer(ephemeral=True)
         if not self.inverted:
-
             if not self.bot.latest_image:
-                comic = self.bot.db.get_past_n_comics(1)
+                comic = await self.bot.db.get_past_n_comics(1)
                 if not comic:
                     return logger.error("could not get latest comic from db")
                 comic = comic[0]
@@ -200,79 +356,26 @@ class InteractCog(commands.Cog):
             file = discord.File(fp=img_bin, filename="inverted.png")
             embed = discord.Embed()
             embed.set_image(url=f"attachment://inverted.png")
-            await self.bot.active_channel.send(embed=embed, file=file)
+            if isinstance(interaction.channel, TextChannel):
+                await interaction.channel.send(embed=embed, file=file)
         await interaction.delete_original_response()
-
-
-class RatingsCog(commands.Cog):
-    def __init__(self, bot: "FingerporiBot"):
-        self.bot = bot
-        self.EMOJI_MAP = {"0️⃣": 0, "1️⃣": 1, "2️⃣": 2, "3️⃣": 3, "4️⃣": 4, "5️⃣": 5}
-        self.update_ratings.start()
-
-    @tasks.loop(time=SUB_TIME)
-    async def update_ratings(self):
-        if not self.bot.active_channel:
-            logger.critical("no active channel!!!")
-            return
-
-        logger.debug("syncing reactions to db")
-
-        comics = self.bot.db.get_past_n_comics(7)
-
-        for comic in comics:
-            if not comic.message_id:
-                logger.warning(f"comic {comic.date} message_id missing")
-                continue
-            if comic.poll_closed:
-                logger.debug(f"comic {comic.date} poll already closed")
-                continue
-            try:
-                message = await self.bot.active_channel.fetch_message(comic.message_id)
-                if (
-                    message.poll
-                    and message.poll.answers
-                    and message.poll.is_finalised()
-                ):
-                    ratings = [0, 0, 0, 0, 0, 0]
-                    for answer in message.poll.answers:
-                        emoji = str(answer.emoji)
-                        if emoji in self.EMOJI_MAP:
-                            index = self.EMOJI_MAP[emoji]
-                            ratings[index] = answer.vote_count
-                        else:
-                            logger.warning(f"unexpected poll answer: {answer.text}")
-                    self.bot.db.update_ratings(comic, ratings)
-                else:
-                    logger.warning(f"comic {comic.date} poll not found or finalized")
-                    continue
-            except discord.NotFound:
-                logger.warning(f"message {comic.message_id} not found")
-                continue
-            except Exception as e:
-                logger.error(f"error syncing {comic.message_id}: {e}")
-                continue
-        logger.info("ratings synced")
-
-    @update_ratings.before_loop
-    async def before_loop(self):
-        await self.bot.wait_until_ready()
-        logger.debug("starting RatingsCog @task.loop")
 
 
 class AdminCog(commands.Cog):
     def __init__(self, bot: "FingerporiBot"):
-        self.bot = cast("FingerporiBot", bot)
+        self.bot: FingerporiBot = bot
 
     @app_commands.command(name="scrape")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.default_permissions(administrator=True)
+    @is_owner()
     async def force_scrape(self, interaction: discord.Interaction):
-        posts_cog = cast("PostsCog", self.bot.get_cog("PostsCog"))
-        if posts_cog:
+        posts_cog = self.bot.get_cog("PostsCog")
+        if isinstance(posts_cog, PostsCog):
             await interaction.response.send_message(
                 "Manual scrape started", ephemeral=True
             )
             await posts_cog.send_to_discord()
+            await interaction.edit_original_response(content="scraping done")
         else:
             await interaction.response.send_message(
                 "error: PostsCog not loaded.", ephemeral=True
@@ -285,14 +388,18 @@ class AdminCog(commands.Cog):
     async def set_channel(self, interaction: discord.Interaction):
 
         channel_id = interaction.channel_id
-        self.bot.db.set_config("channel_id", str(channel_id))
+        guild_id = interaction.guild_id
+        if not channel_id or not guild_id:
+            logger.error(
+                f"no guild or channel id found\nguild_id: {guild_id}\tchannel_id: {channel_id}"
+            )
+            return
+        await self.bot.db.set_active_channel(guild_id, channel_id)
 
         await interaction.response.send_message(
-            f"Update channel set to <#{channel_id}>"
+            f"Active channel set to <#{channel_id}>"
         )
-        logger.info(
-            f"Update channel set to #{channel_id}. Restart bot for changes to take effect"
-        )
+        logger.info(f"Update channel for guild {guild_id} set to #{channel_id}.")
 
 
 if __name__ == "__main__":

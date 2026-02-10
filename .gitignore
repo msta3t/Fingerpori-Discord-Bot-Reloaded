@@ -16,3 +16,4 @@ include/
 fpori.db
 images/
 *.log
+pyrightconfig.json

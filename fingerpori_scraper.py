@@ -1,14 +1,9 @@
-from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
 import logging
-import os
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 import re
-import requests
 import time
-
-from fingerpori_db import DbManager
 
 load_dotenv()
 
@@ -26,75 +21,53 @@ def get_year(comic_month: int):
     return year
 
 
-def get_latest_fingerpori():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
+async def get_latest_fingerpori() -> dict[str,(str | bytes | None)] | None:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        page = context.new_page()
+        page = await context.new_page()
 
-        page.goto(TARGET_URL, wait_until="networkidle")
-        page.mouse.wheel(0, 500)
+        await page.goto(TARGET_URL, wait_until="networkidle")
+        await page.mouse.wheel(0, 500)
         time.sleep(2)
 
-        html = page.content()
-        soup = BeautifulSoup(html, "html.parser")
-        browser.close()
+        article = page.locator("article")
+        if await article.count() == 0:
+            return None
 
-        article = soup.find("article")
-        if article:
-            img_tag = article.find("img", alt=lambda x: x and "Pertti Jarla" in x)  
-            date = article.find("span", class_=lambda x: x and "timestamp-label" in x).getText()  
+        img_locator = article.get_by_alt_text(re.compile(r"Pertti Jarla"))
+        date_locator = article.locator("span.timestamp-label")
 
-            match = re.search(r"(\d{1,2}\.\d{1,2}\.)", date)
+        if await img_locator.count() > 0:
+            img_url = await img_locator.get_attribute("src")
+            if not img_url:
+                logger.critical("image url not found!")
+                return None
+            if "468.jpg" in img_url:
+                img_url = img_url.replace("468.jpg", "978.jpg")
+            
+            response = await page.request.get(img_url)
+            if response.status == 200:
+                img_bytes = await response.body()
+            else:
+                img_bytes = None
+                logger.critical(f"failed to download image with code: {response.status}")
+
+            raw_date = await date_locator.inner_text() if await date_locator.count() > 0 else ""
+            match = re.search(r"(\d{1,2}\.\d{1,2}\.)", raw_date)
             if match:
-                date = match.group(1)
-                date += str(get_year(int(date.split(".")[1])))
-                date = datetime.strptime(date, "%d.%m.%Y").strftime("%Y-%m-%d")
+                date_str = match.group(1)
+                date_str += str(get_year(int(date_str.split(".")[1])))
+                date = datetime.strptime(date_str, "%d.%m.%Y").strftime("%Y-%m-%d")
             else:
                 date = datetime.now().strftime("%Y-%m-%d")
-
-            if img_tag:
-                img_url = img_tag.get("src")
-                if "468.jpg" in img_url:  
-                    img_url = img_url.replace("468.jpg", "978.jpg")  
-                return {"date": date, "url": img_url}
+    
+            return {
+                "date": date,
+                "url": img_url,
+                "bytes": img_bytes
+            }
+    
         return None
-
-
-def send_to_webhook(comic):
-    if comic:
-        date = comic["date"]
-        url = comic["url"]
-
-        datef = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
-        payload = {
-            "embeds": [
-                {
-                    "title": "Päivän Fingerpori",
-                    "color": 5814783,  # A nice blue color
-                    "image": {"url": url},
-                    "footer": {"text": f"Fingerpori {datef}"},
-                }
-            ]
-        }
-        if conn:
-            db.save_comic(date, url)
-        else:
-            logger.critical("could not save comic to db")
-    else:
-        payload = {"content": "botti rikki :/"}
-    r = requests.post(WEBHOOK_URL, json=payload)  
-    if r.status_code != 204:
-        logger.error(f"Error: {r.text}")
-
-
-if __name__ == "__main__":
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-    db = DbManager()
-    conn = db.conn
-
-    comic = get_latest_fingerpori()
-    send_to_webhook(comic)
