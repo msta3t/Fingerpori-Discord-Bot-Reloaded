@@ -18,8 +18,8 @@ In **Settings** -> **Installation**
 
 In **Settings** -> **Bot**
 - Click **Reset Token** and copy it to .env
-- Disable **Public Bot**
 - Enable **Presence Intent**
+- Enable **Server Members Intent**
 - Enable **Message Content Intent**
 
 In **Settings** -> **OAuth2**
@@ -29,6 +29,7 @@ In **Settings** -> **OAuth2**
 -  Check in **Bot Permissions** -> **Text Permissions**:
    -  **Send Messages**
    -  **Embed Links**
+   -  **Attach Files**
    -  **Read Message History**
    -  **Create Polls**
 - Open generated URL to add the bot to your server
