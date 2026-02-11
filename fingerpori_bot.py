@@ -1,17 +1,18 @@
-from datetime import datetime, timedelta
-from discord.user import User
-import discord
-from discord import TextChannel, app_commands
-from discord.utils import _ColourFormatter
-from discord.ext import tasks, commands
-from dotenv import load_dotenv
 import io
 import logging
 import os
-from PIL import Image, ImageOps
 import sys
-from typing import override
 import zoneinfo
+from datetime import datetime, timedelta
+from typing import override
+
+import discord
+from discord import TextChannel, app_commands
+from discord.ext import commands, tasks
+from discord.user import User
+from discord.utils import _ColourFormatter
+from dotenv import load_dotenv
+from PIL import Image, ImageOps
 
 import fingerpori_scraper as scraper
 from fingerpori_db import DbManager, RatingMode
@@ -57,7 +58,10 @@ SUB_TIME = sub_dt.timetz()
 
 
 # env
-USER_ID = int(os.getenv("USER_ID"))  # pyright: ignore[reportArgumentType]
+user_id = os.getenv("USER_ID")
+if user_id is None:
+    sys.exit("no user id provided")
+USER_ID = int(user_id)
 TOKEN = os.getenv("TOKEN")
 if TOKEN is None:
     sys.exit("no token provided")
@@ -78,7 +82,7 @@ class PostView(discord.ui.View):
         self.add_item(
             discord.ui.Button(
                 style=discord.ButtonStyle.grey,
-                label="0 (0)",
+                label="0",
                 custom_id=f"fpori:{self.comic_id}:1",
                 row=0,
                 emoji="1️⃣",
@@ -87,7 +91,7 @@ class PostView(discord.ui.View):
         self.add_item(
             discord.ui.Button(
                 style=discord.ButtonStyle.grey,
-                label="0 (0)",
+                label="0",
                 custom_id=f"fpori:{self.comic_id}:2",
                 row=0,
                 emoji="2️⃣",
@@ -96,7 +100,7 @@ class PostView(discord.ui.View):
         self.add_item(
             discord.ui.Button(
                 style=discord.ButtonStyle.grey,
-                label="0 (0)",
+                label="0",
                 custom_id=f"fpori:{self.comic_id}:3",
                 row=0,
                 emoji="3️⃣",
@@ -105,7 +109,7 @@ class PostView(discord.ui.View):
         self.add_item(
             discord.ui.Button(
                 style=discord.ButtonStyle.grey,
-                label="0 (0)",
+                label="0",
                 custom_id=f"fpori:{self.comic_id}:4",
                 row=0,
                 emoji="4️⃣",
@@ -114,7 +118,7 @@ class PostView(discord.ui.View):
         self.add_item(
             discord.ui.Button(
                 style=discord.ButtonStyle.grey,
-                label="0 (0)",
+                label="0",
                 custom_id=f"fpori:{self.comic_id}:5",
                 row=0,
                 emoji="5️⃣",
@@ -123,7 +127,7 @@ class PostView(discord.ui.View):
 
 
 class FingerporiBot(commands.Bot):
-    def __init__(self, db: DbManager, *args, **kwargs):  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
+    def __init__(self, db: DbManager, *args, **kwargs): 
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
@@ -209,7 +213,7 @@ class PostsCog(commands.Cog):
             logger.info("skipping comic")
             return
 
-        embed = discord.Embed(color=discord.Color.light_grey())
+        embed = discord.Embed(title="Päivän Fingerpori", color=discord.Color.light_grey())
         embed.set_image(url=data["url"])
         embed.set_footer(
             text=f'{datetime.strptime(comic.date, "%Y-%m-%d").strftime("%d.%m.%Y")}'
@@ -288,7 +292,8 @@ class VoteCog(commands.Cog):
             if isinstance(item, discord.ui.Button) and item.custom_id:
                 rating = int(item.custom_id.split(":")[2])
                 localvotes, globalvotes = votes.get(rating, (0, 0))
-                item.label = f"{localvotes} ({globalvotes})"
+                item.label = f"{localvotes}"
+                # item.label = f"{localvotes} ({globalvotes})"
         await interaction.response.edit_message(view=view)
 
     @tasks.loop(time=SUB_TIME)
@@ -300,6 +305,19 @@ class VoteCog(commands.Cog):
             message_id, channel_id, guild_id, comic_id = row
 
             votes = await self.bot.db.get_votes(guild_id, comic_id)
+
+            local_sum = 0
+            local_count = 0
+            global_sum = 0
+            global_count = 0
+            for score, (local, glob) in votes.items():
+                local_sum += score * local
+                local_count += local
+                global_sum += score * glob
+                global_count += glob
+            local_avg = local_sum / local_count if local_count > 0 else 0
+            global_avg = global_sum / global_count if global_count > 0 else 0
+
             try:
                 channel = self.bot.get_channel(
                     channel_id
@@ -318,8 +336,16 @@ class VoteCog(commands.Cog):
 
                         rating = int(item.custom_id.split(":")[2])
                         localvotes, globalvotes = votes.get(rating, (0, 0))
-                        item.label = f"{localvotes} ({globalvotes})"
-                await message.edit(view=view)
+                        item.label = f"{localvotes}   ({globalvotes})"
+
+                guild_name = message.guild.name if message.guild else "guild"
+
+                embed = message.embeds[0].copy()
+                embed2 = discord.Embed(title="Tulokset", color=discord.Color.light_grey())
+                embed2.add_field(name=guild_name, value=f"📍 **{local_avg:.1f}**", inline=True)
+                embed2.add_field(name="Kaikki servut", value=f"🇫🇮 **{global_avg:.1f}**", inline=True)
+
+                await message.edit(embeds=[embed, embed2], view=view)
             except discord.NotFound:
                 logger.warning(f"message {message_id} not found")
             except Exception as e:
@@ -355,7 +381,7 @@ class InteractCog(commands.Cog):
 
             file = discord.File(fp=img_bin, filename="inverted.png")
             embed = discord.Embed()
-            embed.set_image(url=f"attachment://inverted.png")
+            embed.set_image(url="attachment://inverted.png")
             if isinstance(interaction.channel, TextChannel):
                 await interaction.channel.send(embed=embed, file=file)
         await interaction.delete_original_response()
@@ -364,22 +390,6 @@ class InteractCog(commands.Cog):
 class AdminCog(commands.Cog):
     def __init__(self, bot: "FingerporiBot"):
         self.bot: FingerporiBot = bot
-
-    @app_commands.command(name="scrape")
-    @app_commands.default_permissions(administrator=True)
-    @is_owner()
-    async def force_scrape(self, interaction: discord.Interaction):
-        posts_cog = self.bot.get_cog("PostsCog")
-        if isinstance(posts_cog, PostsCog):
-            await interaction.response.send_message(
-                "Manual scrape started", ephemeral=True
-            )
-            await posts_cog.send_to_discord()
-            await interaction.edit_original_response(content="scraping done")
-        else:
-            await interaction.response.send_message(
-                "error: PostsCog not loaded.", ephemeral=True
-            )
 
     @app_commands.command(
         name="set_channel", description="set current channel as active channel"
@@ -400,6 +410,40 @@ class AdminCog(commands.Cog):
             f"Active channel set to <#{channel_id}>"
         )
         logger.info(f"Update channel for guild {guild_id} set to #{channel_id}.")
+
+    @commands.command(hidden=True)
+    @commands.dm_only()
+    @commands.is_owner()
+    async def scrape(self, ctx: commands.Context[FingerporiBot]):
+        posts_cog = self.bot.get_cog("PostsCog")
+        if isinstance(posts_cog, PostsCog):
+            await ctx.send("Manual scrape started")
+            await posts_cog.send_to_discord()
+            await ctx.send("scraping done")
+        else:
+            await ctx.send("error: PostsCog not loaded.")
+
+    @commands.command(hidden=True)
+    @commands.dm_only()
+    @commands.is_owner()
+    async def sync(self,ctx: commands.Context[FingerporiBot]):
+        try:
+            synced = await self.bot.tree.sync()
+            await ctx.send(f"synced {len(synced)} global commands")
+        except Exception as e:
+            await ctx.send(f"error syncing {e}")
+
+    @commands.command(hidden=True)
+    @commands.dm_only()
+    @commands.is_owner()
+    async def closepolls(self,ctx: commands.Context[FingerporiBot]):
+        vote_cog = self.bot.get_cog("VoteCog")
+        if isinstance(vote_cog, VoteCog):
+            await ctx.send("Closing polls")
+            await vote_cog.close_polls()
+            await ctx.send("Polls closed")
+        else:
+            await ctx.send("error: VoteCog not loaded")
 
 
 if __name__ == "__main__":

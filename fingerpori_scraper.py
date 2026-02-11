@@ -1,14 +1,22 @@
-from datetime import datetime
-from dotenv import load_dotenv
+import asyncio
 import logging
-from playwright.async_api import async_playwright
+import os
 import re
 import time
+from datetime import datetime
+
+import aiohttp
+import discord
+from dotenv import load_dotenv
+from playwright.async_api import async_playwright
+
+from fingerpori_db import DbManager
 
 load_dotenv()
 
 TARGET_URL = "https://www.hs.fi/sarjakuvat/fingerpori/"
 IMAGE_PATH = "images/"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 logger = logging.getLogger("fingerpori_scraper")
 
@@ -33,12 +41,12 @@ async def get_latest_fingerpori() -> dict[str,(str | bytes | None)] | None:
         await page.mouse.wheel(0, 500)
         time.sleep(2)
 
-        article = page.locator("article")
+        article = page.locator("article").first
         if await article.count() == 0:
             return None
 
-        img_locator = article.get_by_alt_text(re.compile(r"Pertti Jarla"))
-        date_locator = article.locator("span.timestamp-label")
+        img_locator = article.get_by_alt_text(re.compile(r"Pertti Jarla")).first
+        date_locator = article.locator("span.timestamp-label").first
 
         if await img_locator.count() > 0:
             img_url = await img_locator.get_attribute("src")
@@ -46,7 +54,8 @@ async def get_latest_fingerpori() -> dict[str,(str | bytes | None)] | None:
                 logger.critical("image url not found!")
                 return None
             if "468.jpg" in img_url:
-                img_url = img_url.replace("468.jpg", "978.jpg")
+                # img_url = img_url.replace("468.jpg", "978.jpg")
+                img_url = img_url.replace("468.jpg", "1920.jpg")
             
             response = await page.request.get(img_url)
             if response.status == 200:
@@ -71,3 +80,42 @@ async def get_latest_fingerpori() -> dict[str,(str | bytes | None)] | None:
             }
     
         return None
+
+async def send_to_webhook(comic:dict[str,(str|bytes|None)] | None):
+    if not WEBHOOK_URL:
+        return logger.critical("no webhook url provided")
+    
+    async with aiohttp.ClientSession() as session:
+        webhook = discord.Webhook.from_url(WEBHOOK_URL, session=session)
+        if comic:
+            img_date:str = comic["date"] # pyright: ignore[reportAssignmentType]
+            img_url:str = comic["url"] # pyright: ignore[reportAssignmentType]
+            img_bytes:bytes = comic["bytes"] # pyright: ignore[reportAssignmentType]
+
+            datef = datetime.strptime(img_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+
+            embed = discord.Embed(
+                title="Päivän Fingerpori",
+                color=5814783,
+            )
+            embed.set_image(url=img_url)
+            embed.set_footer(text=f"Fingerpori {datef}")
+
+            if db.conn:
+                await db.save_comic(img_date, img_url, img_bytes)
+            else:
+                logger.warning(f"could not save comic to db: {img_date} {img_url}")
+
+            await webhook.send(embed=embed)
+
+        else:
+            await webhook.send(content="botti rikki :/")
+
+async def main():
+    await db.connect()
+    comic = await get_latest_fingerpori()
+    await send_to_webhook(comic)
+
+if __name__ == "__main__":
+    db = DbManager()
+    asyncio.run(main())

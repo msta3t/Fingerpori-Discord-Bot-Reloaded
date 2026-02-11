@@ -1,16 +1,27 @@
-from dataclasses import dataclass
-from dotenv import load_dotenv
-from enum import IntEnum
-import imagehash
 import io
 import logging
 import os
-from PIL import Image
-import aiosqlite
+from dataclasses import dataclass
+from enum import IntEnum
 from typing import override
+
+import aiosqlite
+import imagehash
+from dotenv import load_dotenv
+from PIL import Image
 
 logger = logging.getLogger("fingerpori_db")
 
+class RatingMode(IntEnum):
+    NONE = 0
+    VIEW = 1
+    REACTION = 2
+    POLL = 3
+
+    @classmethod
+    @override
+    def _missing_(cls, value: object) -> "RatingMode":
+        return cls.POLL
 
 @dataclass
 class Comic:
@@ -36,18 +47,6 @@ class GuildData:
     guild_id: int
     channel_id: int
     rating_mode: RatingMode
-
-
-class RatingMode(IntEnum):
-    NONE = 0
-    VIEW = 1
-    REACTION = 2
-    POLL = 3
-
-    @classmethod
-    @override
-    def _missing_(cls, value: object) -> "RatingMode":
-        return cls.POLL
 
 
 if not load_dotenv():
@@ -195,7 +194,7 @@ class DbManager:
             f"{IMAGE_PATH}{date}_{fname}.jpg"  # images/yyyy-mm-dd-1234567890abcdef.jpg
         )
         if not bytes:
-            raise Exception(f"no image provided")
+            raise Exception("no image provided")
         img_content = bytes
         with Image.open(io.BytesIO(img_content)) as img:
             image_hash = str(imagehash.phash(img))
@@ -206,8 +205,8 @@ class DbManager:
                     "INSERT OR IGNORE INTO comic (date, hash, url, path) VALUES (?, ?, ?, ?) RETURNING comic_id",
                     (date, image_hash, url, path),
                 )
-
-                if not cursor.rowcount > 0:
+                row = await cursor.fetchone()
+                if row is None:
                     logger.info(f"comic is already in db: \ndate:\t{date}\nhash:\t")
                     return None
                 if not os.path.exists(IMAGE_PATH):
@@ -215,9 +214,7 @@ class DbManager:
                 with open(path, "wb") as f:
                     f.write(img_content)
                     logger.debug(f"comic stored in db: \ndate:\t{date}\nhash:\t")
-                row = await cursor.fetchone()
-                if not row:
-                    raise Exception("no comic id returned")
+                
                 comic_id = row[0]
                 if not isinstance(comic_id, int):
                     logger.critical(f"malformed comic id {comic_id}")
@@ -307,7 +304,7 @@ class DbManager:
     async def get_past_n_comics(self, count: int):
         async with self.connection.cursor() as cursor:
             await cursor.execute(
-                "SELECT comic_id, date, hash, url, path, poll_closed FROM fingerpori ORDER BY date DESC LIMIT ?",
+                "SELECT comic_id, date, hash, url, path, poll_closed FROM comic ORDER BY date DESC LIMIT ?",
                 (count,),
             )
             rows = await cursor.fetchall()
