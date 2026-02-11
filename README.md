@@ -8,7 +8,7 @@ Expect this to break often as HS constanly changes their site :)
 Don't forget to run `playwright install` and `playwright install-deps` for the scraper to work
 
 ## fingerpori_bot usage
-Paste your guild id in .env.default and rename to .env
+Paste your user id to get notified when the bot breaks in .env.default and rename to .env
 
 Create new application at https://discord.com/developers/applications
 
