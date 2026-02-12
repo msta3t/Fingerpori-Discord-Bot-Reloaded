@@ -352,6 +352,7 @@ class VoteCog(commands.Cog):
                 logger.warning(f"failed to close poll for {message_id}: {e}")
             closed.add(comic_id)
         await self.bot.db.close_polls(closed)
+        self.bot.active_comics -= closed
 
     @close_polls.before_loop
     async def before_loop(self):
