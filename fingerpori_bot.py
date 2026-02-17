@@ -433,7 +433,7 @@ class InteractCog(commands.Cog):
                 lines.append(f"{EMOJI_MAP[rating]}  {name}")
 
         vote_list = "\n".join(lines)
-        content = f"###Arvosanat: \n\n{vote_list}"
+        content = f"### Arvosanat: \n\n{vote_list}"
 
         self.bot.snitch_cache.setdefault(interaction.guild.id, set()).add(
             interaction.user.id
