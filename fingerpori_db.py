@@ -12,16 +12,17 @@ from PIL import Image
 
 logger = logging.getLogger("fingerpori_db")
 
+
 class RatingMode(IntEnum):
     NONE = 0
     VIEW = 1
-    REACTION = 2
-    POLL = 3
+    SNOOP = 2
 
     @classmethod
     @override
     def _missing_(cls, value: object) -> "RatingMode":
-        return cls.POLL
+        return cls.VIEW
+
 
 @dataclass
 class Comic:
@@ -214,7 +215,7 @@ class DbManager:
                 with open(path, "wb") as f:
                     f.write(img_content)
                     logger.debug(f"comic stored in db: \ndate:\t{date}\nhash:\t")
-                
+
                 comic_id = row[0]
                 if not isinstance(comic_id, int):
                     logger.critical(f"malformed comic id {comic_id}")
@@ -261,9 +262,7 @@ class DbManager:
 
     async def get_active_comic_ids(self) -> set[int]:
         async with self.connection.cursor() as cursor:
-            await cursor.execute(
-                "SELECT comic_id FROM comic WHERE poll_closed = 0"
-            )
+            await cursor.execute("SELECT comic_id FROM comic WHERE poll_closed = 0")
             rows = await cursor.fetchall()
             return {row[0] for row in rows}
 
@@ -271,7 +270,8 @@ class DbManager:
         async with self.connection.cursor() as cursor:
             await cursor.execute(
                 """
-                SELECT message.message_id, message.channel_id, guild.guild_id, comic.comic_id FROM message
+                SELECT message.message_id, message.channel_id, guild.guild_id, comic.comic_id, guild.rating_mode 
+                FROM message
                 JOIN comic ON message.comic_id = comic.comic_id
                 JOIN guild ON message.guild_id = guild.guild_id
                 WHERE comic.poll_closed = 0
@@ -285,6 +285,7 @@ class DbManager:
                         row["channel_id"],
                         row["guild_id"],
                         row["comic_id"],
+                        row["rating_mode"],
                     )
                     for row in rows
                 ]
@@ -359,6 +360,37 @@ class DbManager:
             return {
                 row[0]: (row[1], row[2]) for row in rows
             }  # {rating: (local, global)}
+
+    async def get_guild_user_votes(self, guild_id:int, comic_id:int) -> list[dict[str, int]]:
+        """
+        Gets local user ratings for a specific comic in a guild
+
+        Args:
+            guild_id (int): Discord ID of the guild to filter by
+            comic_id (int): Internal comic ID
+
+        Returns:
+            A list of dicts sorted by rating descending {user_id, rating}
+
+        Raises:
+            sqlite3.Error: If query fails
+        """
+        try:
+            async with self.connection.cursor() as cursor:
+                await cursor.execute("""
+                    SELECT vote.user_id, vote.rating
+                    FROM vote
+                    JOIN message ON vote.message_id = message.message_id
+                    WHERE vote.comic_id = ? AND message.guild_id = ?
+                    ORDER BY vote.rating DESC
+                """,
+                    (comic_id, guild_id),
+                )
+                rows = await cursor.fetchall()
+                return [{"user_id": row[0], "rating": row[1]} for row in rows]
+        except aiosqlite.Error as e:
+            logger.critical(f"DB error when getting ratings for guild id {guild_id}: {e}")
+            raise
 
     async def close(self):
         await self.connection.close()

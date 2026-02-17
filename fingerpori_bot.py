@@ -1,16 +1,17 @@
+from discord.ui.text_display import TextDisplay
 import io
 import logging
 import os
 import sys
 import zoneinfo
 from datetime import datetime, timedelta
-from typing import override
+from typing import Any, override
 
 import discord
 from discord import TextChannel, app_commands
 from discord.ext import commands, tasks
 from discord.user import User
-from discord.utils import _ColourFormatter
+from discord.utils import _ColourFormatter  # pyright: ignore[reportPrivateUsage]
 from dotenv import load_dotenv
 from PIL import Image, ImageOps
 
@@ -126,8 +127,31 @@ class PostView(discord.ui.View):
         )
 
 
+class VoteDisplay(discord.ui.Modal):
+    def __init__(self, votes: list[dict[str, Any]]):
+        super().__init__(timeout=None, title="Arvostelut:")
+
+        EMOJI_MAP = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣"}
+        lines: list[str] = []
+        if votes:
+            for vote in votes:
+                name = vote["user_name"]
+                rating = vote["rating"]
+                if name and rating in EMOJI_MAP:
+                    lines.append(f"{EMOJI_MAP[rating]}  {name}")
+            content = "\n".join(lines)
+        else:
+            content = "Tämähän on tyhjää täynnä"
+        text: TextDisplay[Any] = discord.ui.TextDisplay(content=content)
+        self.add_item(text)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+
 class FingerporiBot(commands.Bot):
-    def __init__(self, db: DbManager, *args, **kwargs): 
+    def __init__(self, db: DbManager, *args: Any, **kwargs: Any):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
@@ -140,6 +164,7 @@ class FingerporiBot(commands.Bot):
 
         self.active_comics: set[int] = set[int]()
         self.latest_image: Image.Image | None = None
+        self.snitch_cache: dict[int, set[int]] = {}
 
     @override
     async def setup_hook(self):
@@ -206,14 +231,16 @@ class PostsCog(commands.Cog):
         img_date, img_url, img_bytes = data["date"], data["url"], data["bytes"]
 
         comic = await self.bot.db.save_comic(
-            img_date, img_url, img_bytes # pyright: ignore[reportArgumentType]
-        )  
+            img_date, img_url, img_bytes  # pyright: ignore[reportArgumentType]
+        )
 
         if not comic:
             logger.info("skipping comic")
             return
 
-        embed = discord.Embed(title="Päivän Fingerpori", color=discord.Color.light_grey())
+        embed = discord.Embed(
+            title="Päivän Fingerpori", color=discord.Color.light_grey()
+        )
         embed.set_image(url=data["url"])
         embed.set_footer(
             text=f'{datetime.strptime(comic.date, "%Y-%m-%d").strftime("%d.%m.%Y")}'
@@ -291,7 +318,9 @@ class VoteCog(commands.Cog):
         for item in view.children:
             if isinstance(item, discord.ui.Button) and item.custom_id:
                 rating = int(item.custom_id.split(":")[2])
-                localvotes, globalvotes = votes.get(rating, (0, 0))
+                localvotes, globalvotes = votes.get( # pyright: ignore[reportUnusedVariable]
+                    rating, (0, 0)
+                )  
                 item.label = f"{localvotes}"
                 # item.label = f"{localvotes} ({globalvotes})"
         await interaction.response.edit_message(view=view)
@@ -302,7 +331,10 @@ class VoteCog(commands.Cog):
         closed: set[int] = set()
 
         for row in messages:
-            message_id, channel_id, guild_id, comic_id = row
+            message_id, channel_id, guild_id, comic_id, rating_mode = row
+            rating_mode = RatingMode(rating_mode)
+            if rating_mode == RatingMode.NONE:
+                continue
 
             votes = await self.bot.db.get_votes(guild_id, comic_id)
 
@@ -341,9 +373,15 @@ class VoteCog(commands.Cog):
                 guild_name = message.guild.name if message.guild else "guild"
 
                 embed = message.embeds[0].copy()
-                embed2 = discord.Embed(title="Tulokset", color=discord.Color.light_grey())
-                embed2.add_field(name=guild_name, value=f"📍 **{local_avg:.1f}**", inline=True)
-                embed2.add_field(name="Kaikki servut", value=f"🇫🇮 **{global_avg:.1f}**", inline=True)
+                embed2 = discord.Embed(
+                    title="Tulokset", color=discord.Color.light_grey()
+                )
+                embed2.add_field(
+                    name=guild_name, value=f"📍 **{local_avg:.1f}**", inline=True
+                )
+                embed2.add_field(
+                    name="Kaikki servut", value=f"🇫🇮 **{global_avg:.1f}**", inline=True
+                )
 
                 await message.edit(embeds=[embed, embed2], view=view)
             except discord.NotFound:
@@ -364,7 +402,7 @@ class InteractCog(commands.Cog):
         self.bot: FingerporiBot = bot
         self.inverted: Image.Image | None = None
 
-    @app_commands.command(name="invert")
+    @app_commands.command(name="black")
     async def invert(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         if not self.inverted:
@@ -386,6 +424,53 @@ class InteractCog(commands.Cog):
             if isinstance(interaction.channel, TextChannel):
                 await interaction.channel.send(embed=embed, file=file)
         await interaction.delete_original_response()
+
+    @app_commands.command(name="tiiraile")
+    async def snoop(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return
+
+        comic = await self.bot.db.get_past_n_comics(1)
+        if not comic:
+            await interaction.response.send_message("Ei fingerporia.", ephemeral=True)
+            return
+        comic_id = comic[0].id
+        ratings: list[dict[str, Any]] = await self.bot.db.get_guild_user_votes(
+            interaction.guild.id, comic_id
+        )
+        for item in ratings:
+            member = interaction.guild.get_member(item["user_id"])
+            item["user_name"] = member.display_name if member else None
+
+        self.bot.snitch_cache.setdefault(interaction.guild.id, set()).add(
+            interaction.user.id
+        )
+
+        await interaction.response.send_modal(VoteDisplay(ratings))
+
+    @app_commands.command(name="vasikoi")
+    async def snitch(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        users = self.bot.snitch_cache.get(interaction.guild.id)
+
+        if not users:
+            await interaction.followup.send("Ei tiirailijoita")
+            return
+
+        names: list[str] = []
+
+        for id in users:
+            member = interaction.guild.get_member(id)
+            if member:
+                names.append(member.display_name)
+        names.sort()
+        user_list = "\n".join(names)
+        content = f"###Tiirailijat: \n{user_list}"
+        await interaction.followup.send(content=content, ephemeral=True)
 
 
 class AdminCog(commands.Cog):
@@ -427,7 +512,7 @@ class AdminCog(commands.Cog):
     @commands.command(hidden=True)
     @commands.dm_only()
     @commands.is_owner()
-    async def sync(self,ctx: commands.Context[FingerporiBot]):
+    async def sync(self, ctx: commands.Context[FingerporiBot]):
         try:
             synced = await self.bot.tree.sync()
             await ctx.send(f"synced {len(synced)} global commands")
@@ -437,7 +522,7 @@ class AdminCog(commands.Cog):
     @commands.command(hidden=True)
     @commands.dm_only()
     @commands.is_owner()
-    async def closepolls(self,ctx: commands.Context[FingerporiBot]):
+    async def closepolls(self, ctx: commands.Context[FingerporiBot]):
         vote_cog = self.bot.get_cog("VoteCog")
         if isinstance(vote_cog, VoteCog):
             await ctx.send("Closing polls")
