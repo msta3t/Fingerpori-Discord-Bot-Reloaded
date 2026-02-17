@@ -1,4 +1,3 @@
-from discord.ui.text_display import TextDisplay
 import io
 import logging
 import os
@@ -125,29 +124,6 @@ class PostView(discord.ui.View):
                 emoji="5️⃣",
             )
         )
-
-
-class VoteDisplay(discord.ui.Modal):
-    def __init__(self, votes: list[dict[str, Any]]):
-        super().__init__(timeout=None, title="Arvostelut:")
-
-        EMOJI_MAP = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣"}
-        lines: list[str] = []
-        if votes:
-            for vote in votes:
-                name = vote["user_name"]
-                rating = vote["rating"]
-                if name and rating in EMOJI_MAP:
-                    lines.append(f"{EMOJI_MAP[rating]}  {name}")
-            content = "\n".join(lines)
-        else:
-            content = "Tämähän on tyhjää täynnä"
-        text: TextDisplay[Any] = discord.ui.TextDisplay(content=content)
-        self.add_item(text)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
 
 
 class FingerporiBot(commands.Bot):
@@ -430,23 +406,40 @@ class InteractCog(commands.Cog):
         if not interaction.guild:
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         comic = await self.bot.db.get_past_n_comics(1)
         if not comic:
             await interaction.response.send_message("Ei fingerporia.", ephemeral=True)
             return
         comic_id = comic[0].id
+
         ratings: list[dict[str, Any]] = await self.bot.db.get_guild_user_votes(
             interaction.guild.id, comic_id
         )
+        if not ratings:
+            await interaction.followup.send("Tämähän on tyhjää täynnä")
+            return
+
+        EMOJI_MAP = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣"}
+
+        lines: list[str] = []
+
         for item in ratings:
             member = interaction.guild.get_member(item["user_id"])
-            item["user_name"] = member.display_name if member else None
+            name = member.display_name if member else None
+            rating = item["rating"]
+            if name and rating in EMOJI_MAP:
+                lines.append(f"{EMOJI_MAP[rating]}  {name}")
+
+        vote_list = "\n".join(lines)
+        content = f"###Arvosanat: \n\n{vote_list}"
 
         self.bot.snitch_cache.setdefault(interaction.guild.id, set()).add(
             interaction.user.id
         )
 
-        await interaction.response.send_modal(VoteDisplay(ratings))
+        await interaction.followup.send(content)
 
     @app_commands.command(name="vasikoi")
     async def snitch(self, interaction: discord.Interaction):
@@ -469,7 +462,7 @@ class InteractCog(commands.Cog):
                 names.append(member.display_name)
         names.sort()
         user_list = "\n".join(names)
-        content = f"###Tiirailijat: \n{user_list}"
+        content = f"### Tiirailijat: \n\n{user_list}"
         await interaction.followup.send(content=content, ephemeral=True)
 
 
