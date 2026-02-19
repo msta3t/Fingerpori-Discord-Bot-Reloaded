@@ -427,7 +427,7 @@ class InteractCog(commands.Cog):
 
         for item in ratings:
             member = interaction.guild.get_member(item["user_id"])
-            name = member.display_name if member else None
+            name = member.global_name if member else None
             rating = item["rating"]
             if name and rating in EMOJI_MAP:
                 lines.append(f"{EMOJI_MAP[rating]}  {name}")
@@ -458,8 +458,9 @@ class InteractCog(commands.Cog):
 
         for id in users:
             member = interaction.guild.get_member(id)
-            if member:
-                names.append(member.display_name)
+            name = member.global_name if member else None
+            if name:
+                names.append(name)
         names.sort()
         user_list = "\n".join(names)
         content = f"### Tiirailijat: \n\n{user_list}"
@@ -473,6 +474,7 @@ class AdminCog(commands.Cog):
     @app_commands.command(
         name="set_channel", description="set current channel as active channel"
     )
+    @app_commands.default_permissions(administrator=True)
     @app_commands.checks.has_permissions(administrator=True)
     async def set_channel(self, interaction: discord.Interaction):
 
